@@ -1,4 +1,4 @@
-name: ⬇️ 1-Download from url
+name: ⬇️ 02-Download from url
 
 on:
   workflow_dispatch:
@@ -15,11 +15,6 @@ on:
         options:
           - normal
           - zip
-      split_threshold_mb:
-        description: 'Split files larger than this MB (0 = never split)'
-        required: false
-        default: 90
-        type: number
 
 jobs:
   save-file:
@@ -47,32 +42,106 @@ jobs:
         run: |
           MODE="${{ github.event.inputs.mode }}"
           URLS="${{ github.event.inputs.urls }}"
-          SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
-          SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
+          SPLIT_MB=90
+          SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
 
           echo "🏷️  AVASAM (https://avasam.ir) - Downloading with mode: $MODE"
-          echo "Split threshold: $SPLIT_THRESHOLD_MB MB"
+          echo "Auto split threshold: ${SPLIT_MB} MB"
 
           mkdir -p downloads tmp_downloads
+
+          # Function to generate random suffix
+          generate_random_suffix() {
+            cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 6 | head -n 1
+          }
 
           # Download each URL
           for URL in $URLS; do
             FILENAME=$(basename "$URL")
+            # Remove query string from filename if present
+            FILENAME="${FILENAME%%\?*}"
             echo "⬇️ Downloading $URL -> $FILENAME"
-            aria2c \
+
+            # Try to download, capture errors
+            if aria2c \
               --split=2 \
               --max-connection-per-server=2 \
               --min-split-size=90M \
               --dir="tmp_downloads" \
               --out="$FILENAME" \
-              "$URL"
+              "$URL" 2>&1; then
+              echo "✅ Downloaded: $FILENAME"
+            else
+              ERROR_MSG=$?
+              echo "❌ Failed to download: $FILENAME"
+
+              # Get filename without extension for error file
+              FILENAME_NO_EXT="${FILENAME%.*}"
+              ERROR_FILE="downloads/${FILENAME_NO_EXT}_ERROR.txt"
+
+              # Check if error file exists, add suffix if needed
+              if [ -f "$ERROR_FILE" ]; then
+                RANDOM_SUFFIX=$(generate_random_suffix)
+                ERROR_FILE="downloads/${FILENAME_NO_EXT}_${RANDOM_SUFFIX}_ERROR.txt"
+              fi
+
+              # Create error file with details
+              {
+                printf '%s\n' "╔══════════════════════════════════════════════════════════════════╗"
+                printf '%s\n' "║              ❌ AVASAM Download Error Report                      ║"
+                printf '%s\n' "║                   https://avasam.ir                               ║"
+                printf '%s\n' "╚══════════════════════════════════════════════════════════════════╝"
+                printf '\n'
+                printf '%s\n' "📁 File Name: $FILENAME"
+                printf '%s\n' "🔗 URL: $URL"
+                printf '%s\n' "📅 Date: $(date '+%Y-%m-%d %H:%M:%S')"
+                printf '\n'
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+                printf '%s\n' "❌ ERROR DETAILS:"
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+                printf '\n'
+                printf '%s\n' "Download failed with exit code: $ERROR_MSG"
+                printf '\n'
+                printf '%s\n' "Possible reasons:"
+                printf '%s\n' "  • Invalid or broken URL"
+                printf '%s\n' "  • File no longer exists on server"
+                printf '%s\n' "  • Server refused connection"
+                printf '%s\n' "  • Network timeout"
+                printf '%s\n' "  • URL requires authentication"
+                printf '%s\n' "  • File size too large"
+                printf '\n'
+                printf '%s\n' "💡 Suggestions:"
+                printf '%s\n' "  • Check if the URL is correct and accessible"
+                printf '%s\n' "  • Try opening the URL in your browser"
+                printf '%s\n' "  • Make sure the file still exists"
+                printf '%s\n' "  • Try again later if server is busy"
+                printf '\n'
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+                printf '%s\n' "                    🏷️ AVASAM - https://avasam.ir"
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+              } > "$ERROR_FILE"
+
+              echo "📄 Created error report: $ERROR_FILE"
+            fi
           done
 
           # Zip all downloads if mode is 'zip'
           if [ "$MODE" = "zip" ]; then
-            ARCHIVE_NAME="downloads/archive_$(date +%Y%m%d_%H%M%S).zip"
-            echo "📦 Creating zip archive: $ARCHIVE_NAME"
-            zip -j "$ARCHIVE_NAME" tmp_downloads/*
+            # Check if any files were downloaded
+            if [ -z "$(ls -A tmp_downloads 2>/dev/null)" ]; then
+              echo "⚠️ No files to zip"
+            else
+              ARCHIVE_NAME="archive_$(date +%Y%m%d_%H%M%S)"
+
+              # Check if archive exists
+              if [ -f "downloads/${ARCHIVE_NAME}.zip" ]; then
+                RANDOM_SUFFIX=$(generate_random_suffix)
+                ARCHIVE_NAME="${ARCHIVE_NAME}_${RANDOM_SUFFIX}"
+              fi
+
+              echo "📦 Creating zip archive: downloads/${ARCHIVE_NAME}.zip"
+              zip -j "downloads/${ARCHIVE_NAME}.zip" tmp_downloads/*
+            fi
             rm -rf tmp_downloads
           else
             # Normal mode: handle splitting large files
@@ -80,14 +149,39 @@ jobs:
               [ -f "$FILE" ] || continue
               SIZE=$(stat -c%s "$FILE")
               BASENAME=$(basename "$FILE")
+              FILENAME_NO_EXT="${BASENAME%.*}"
+              EXT="${BASENAME##*.}"
 
-              if [ "$SPLIT_THRESHOLD_BYTES" -gt 0 ] && [ "$SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
-                echo "✂️ $BASENAME is $(( SIZE / 1024 / 1024 ))MB — splitting into ${SPLIT_THRESHOLD_MB}MB parts (zip-split)"
-                # Create a zip split into parts that can be reassembled with `zip -F`
-                zip -0 -s "${SPLIT_THRESHOLD_MB}m" "downloads/${BASENAME}.zip" -j "$FILE"
-                echo "✅ Parts: $(ls downloads/${BASENAME}.z* 2>/dev/null | wc -l)"
+              if [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
+                echo "✂️ $BASENAME is $(( SIZE / 1024 / 1024 ))MB — splitting into ${SPLIT_MB}MB parts"
+
+                # Check if folder already exists, add random suffix if it does
+                FINAL_FOLDER_NAME="${FILENAME_NO_EXT}"
+                if [ -d "downloads/${FINAL_FOLDER_NAME}" ]; then
+                  RANDOM_SUFFIX=$(generate_random_suffix)
+                  FINAL_FOLDER_NAME="${FILENAME_NO_EXT}_${RANDOM_SUFFIX}"
+                  echo "⚠️ Folder exists! Creating new folder: ${FINAL_FOLDER_NAME}"
+                fi
+
+                # Create folder for split files
+                mkdir -p "downloads/${FINAL_FOLDER_NAME}"
+
+                # Create split archive
+                zip -0 -s "${SPLIT_MB}m" "downloads/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.zip" -j "$FILE"
+
+                PART_COUNT=$(ls "downloads/${FINAL_FOLDER_NAME}/"* 2>/dev/null | wc -l)
+                echo "✅ Created $PART_COUNT parts in downloads/${FINAL_FOLDER_NAME}/"
               else
-                cp "$FILE" "downloads/$BASENAME"
+                # Check if file already exists, add random suffix if it does
+                FINAL_FILENAME="${BASENAME}"
+                if [ -f "downloads/${BASENAME}" ]; then
+                  RANDOM_SUFFIX=$(generate_random_suffix)
+                  FINAL_FILENAME="${FILENAME_NO_EXT}_${RANDOM_SUFFIX}.${EXT}"
+                  echo "⚠️ File exists! Saving as: ${FINAL_FILENAME}"
+                fi
+
+                cp "$FILE" "downloads/${FINAL_FILENAME}"
+                echo "✅ Copied: ${FINAL_FILENAME}"
               fi
             done
             rm -rf tmp_downloads
@@ -101,8 +195,14 @@ jobs:
 
           echo "🏷️  AVASAM (https://avasam.ir) - Preparing to commit files"
 
+          # Check if downloads folder has any files
+          if [ ! -d "downloads" ] || [ -z "$(ls -A downloads 2>/dev/null)" ]; then
+            echo "❌ No files to commit in downloads folder"
+            exit 1
+          fi
+
           # Collect all new/modified files under downloads/
-          mapfile -t ALL_FILES < <(git ls-files --others --modified --exclude-standard downloads/)
+          mapfile -t ALL_FILES < <(find downloads -type f -name "*")
 
           TOTAL=${#ALL_FILES[@]}
           echo "📦 Total files to push: $TOTAL"
@@ -125,7 +225,7 @@ jobs:
             git commit -m "[AVASAM] Add downloaded files — batch $BATCH_NUM [skip ci]"
 
             # Pull with rebase before each push to avoid conflicts
-            git pull --rebase origin "$BRANCH"
+            git pull --rebase origin "$BRANCH" || true
             git push origin HEAD:"$BRANCH"
 
             echo "✅ Batch $BATCH_NUM pushed"
