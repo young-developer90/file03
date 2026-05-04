@@ -1,0 +1,32 @@
+╔══════════════════════════════════════════════════════════════════╗
+║              ❌ AVASAM Download Error Report                      ║
+║                   https://avasam.ir                               ║
+╚══════════════════════════════════════════════════════════════════╝
+
+📁 File Name: xampp-windows-x64-8.1.25-0-VS16-installer.exe
+🔗 URL: https://sourceforge.net/projects/xampp/files/XAMPP%20Windows/8.1.25/xampp-windows-x64-8.1.25-0-VS16-installer.exe
+📅 Date: 2026-05-04 13:30:46
+
+═══════════════════════════════════════════════════════════════════
+❌ ERROR DETAILS:
+═══════════════════════════════════════════════════════════════════
+
+Download failed with exit code: 22
+
+Possible reasons:
+  • Invalid or broken URL
+  • File no longer exists on server
+  • Server refused connection
+  • Network timeout
+  • URL requires authentication
+  • File size too large
+
+💡 Suggestions:
+  • Check if the URL is correct and accessible
+  • Try opening the URL in your browser
+  • Make sure the file still exists
+  • Try again later if server is busy
+
+═══════════════════════════════════════════════════════════════════
+                    🏷️ AVASAM - https://avasam.ir
+═══════════════════════════════════════════════════════════════════
