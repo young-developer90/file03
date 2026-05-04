@@ -1,4 +1,4 @@
-name: ⬇️ new-Download from url
+name: ⬇️ 1-Download from url
 
 on:
   workflow_dispatch:
@@ -27,7 +27,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install aria2, zip and curl
+      - name: Install aria2 and zip
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 zip curl
@@ -50,13 +50,13 @@ jobs:
 
           mkdir -p downloads tmp_downloads
 
-          # Function to get unique filename/foldername
+          # Function to get unique filename/folder name
           get_unique_name() {
             local BASE_PATH="$1"
             local NAME="$2"
-            local IS_FOLDER="$3"
-            
-            if [ "$IS_FOLDER" = "true" ]; then
+            local IS_DIR="$3"
+
+            if [ "$IS_DIR" = "true" ]; then
               if [ ! -d "$BASE_PATH/$NAME" ]; then
                 echo "$NAME"
                 return
@@ -71,127 +71,260 @@ jobs:
                 echo "$NAME"
                 return
               fi
-              local EXTENSION="${NAME##*.}"
-              local BASENAME="${NAME%.*}"
-              if [ "$EXTENSION" = "$NAME" ]; then
-                # No extension
-                local COUNTER=1
+              local FILENAME="${NAME%.*}"
+              local EXT="${NAME##*.}"
+              if [ "$FILENAME" = "$NAME" ]; then
+                EXT=""
+              fi
+              local COUNTER=1
+              if [ -n "$EXT" ] && [ "$FILENAME" != "$EXT" ]; then
+                while [ -f "$BASE_PATH/${FILENAME}_${COUNTER}.${EXT}" ]; do
+                  COUNTER=$((COUNTER + 1))
+                done
+                echo "${FILENAME}_${COUNTER}.${EXT}"
+              else
                 while [ -f "$BASE_PATH/${NAME}_${COUNTER}" ]; do
                   COUNTER=$((COUNTER + 1))
                 done
                 echo "${NAME}_${COUNTER}"
-              else
-                local COUNTER=1
-                while [ -f "$BASE_PATH/${BASENAME}_${COUNTER}.${EXTENSION}" ]; do
-                  COUNTER=$((COUNTER + 1))
-                done
-                echo "${BASENAME}_${COUNTER}.${EXTENSION}"
               fi
             fi
           }
 
-          # Function to resolve SourceForge and similar redirect URLs
-          resolve_download_url() {
+          # Function to create error file
+          create_error_file() {
+            local FILENAME="$1"
+            local ERROR_MSG="$2"
+            local URL="$3"
+
+            local ERROR_FILENAME=$(get_unique_name "downloads" "${FILENAME}.error.txt" "false")
+
+            cat > "downloads/$ERROR_FILENAME" << EOF
+═══════════════════════════════════════════════════════════════
+  AVASAM Download Error Report
+  https://avasam.ir
+═══════════════════════════════════════════════════════════════
+
+📁 File: $FILENAME
+🔗 URL: $URL
+📅 Date: $(date '+%Y-%m-%d %H:%M:%S UTC')
+
+❌ ERROR:
+$ERROR_MSG
+
+═══════════════════════════════════════════════════════════════
+  Possible Solutions:
+═══════════════════════════════════════════════════════════════
+• Check if the URL is correct and accessible
+• The file may have been removed or moved
+• The server may require authentication
+• For SourceForge: Try using the direct download link
+• Some servers block automated downloads (403 Forbidden)
+• Try again later if it's a temporary server issue
+
+═══════════════════════════════════════════════════════════════
+EOF
+            echo "📝 Error file created: downloads/$ERROR_FILENAME"
+          }
+
+          # Function to handle SourceForge URLs
+          get_sourceforge_direct_url() {
             local URL="$1"
-            local RESOLVED_URL="$URL"
-            
-            # Check if it's a SourceForge URL
             if [[ "$URL" == *"sourceforge.net"* ]]; then
-              echo "🔄 Detected SourceForge URL, resolving direct download link..." >&2
               # SourceForge direct download URL pattern
-              if [[ "$URL" != *"/download" ]]; then
-                RESOLVED_URL="${URL}/download"
+              if [[ "$URL" != *"/download"* ]]; then
+                echo "${URL}/download"
+              else
+                echo "$URL"
               fi
-              # Follow redirects to get the actual mirror URL
-              local FINAL_URL=$(curl -sIL -o /dev/null -w '%{url_effective}' --max-time 30 "$RESOLVED_URL" 2>/dev/null)
-              if [ -n "$FINAL_URL" ] && [[ "$FINAL_URL" != "$RESOLVED_URL" ]]; then
-                echo "🔗 Resolved to: $FINAL_URL" >&2
-                RESOLVED_URL="$FINAL_URL"
-              fi
+            else
+              echo "$URL"
             fi
-            
-            echo "$RESOLVED_URL"
           }
 
-          # Function to download with retry and error handling
-          download_file() {
+          # Function to download with retry and fallback
+          download_with_retry() {
             local URL="$1"
             local FILENAME="$2"
             local MAX_RETRIES=3
             local RETRY_DELAY=5
             local SUCCESS=false
-            local ERROR_MSG=""
-            
-            # Resolve URL (handle SourceForge, etc.)
-            local RESOLVED_URL=$(resolve_download_url "$URL")
-            
-            for ((ATTEMPT=1; ATTEMPT<=MAX_RETRIES; ATTEMPT++)); do
-              echo "⬇️ Attempt $ATTEMPT/$MAX_RETRIES: Downloading $RESOLVED_URL -> $FILENAME"
-              
-              # Use aria2c with better options for problematic servers
-              ERROR_OUTPUT=$(aria2c \
+            local ERROR_LOG=""
+
+            # Check if it's a SourceForge URL and modify it
+            local DOWNLOAD_URL=$(get_sourceforge_direct_url "$URL")
+
+            for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
+              echo "📥 Attempt $attempt of $MAX_RETRIES for $FILENAME"
+
+              # For SourceForge, add delay before download
+              if [[ "$URL" == *"sourceforge.net"* ]]; then
+                echo "⏳ SourceForge detected - waiting 10 seconds for redirect..."
+                sleep 10
+              fi
+
+              # Try with aria2c first
+              ERROR_LOG=$(aria2c \
                 --split=2 \
                 --max-connection-per-server=2 \
                 --min-split-size=20M \
-                --dir="tmp_downloads" \
-                --out="$FILENAME" \
                 --max-tries=3 \
                 --retry-wait=5 \
                 --timeout=60 \
                 --connect-timeout=30 \
                 --follow-torrent=false \
                 --check-certificate=false \
-                --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-                --header="Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
-                --header="Accept-Language: en-US,en;q=0.5" \
                 --allow-overwrite=true \
-                "$RESOLVED_URL" 2>&1)
-              
-              ARIA_EXIT_CODE=$?
-              
-              if [ $ARIA_EXIT_CODE -eq 0 ] && [ -f "tmp_downloads/$FILENAME" ]; then
-                SUCCESS=true
-                echo "✅ Downloaded successfully: $FILENAME"
-                break
+                --auto-file-renaming=false \
+                --dir="tmp_downloads" \
+                --out="$FILENAME" \
+                "$DOWNLOAD_URL" 2>&1) && SUCCESS=true && break
+
+              echo "⚠️ aria2c failed, trying curl fallback..."
+
+              # Fallback to curl with redirect following
+              ERROR_LOG=$(curl -L -f -# \
+                --retry 3 \
+                --retry-delay 5 \
+                --connect-timeout 30 \
+                --max-time 3600 \
+                -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+                -o "tmp_downloads/$FILENAME" \
+                "$DOWNLOAD_URL" 2>&1) && SUCCESS=true && break
+
+              echo "⏳ Waiting ${RETRY_DELAY}s before retry..."
+              sleep $RETRY_DELAY
+              RETRY_DELAY=$((RETRY_DELAY * 2))
+            done
+
+            if [ "$SUCCESS" = true ] && [ -f "tmp_downloads/$FILENAME" ]; then
+              # Check if file is not empty
+              if [ -s "tmp_downloads/$FILENAME" ]; then
+                echo "✅ Successfully downloaded: $FILENAME"
+                return 0
               else
-                ERROR_MSG="$ERROR_OUTPUT"
-                echo "⚠️ Attempt $ATTEMPT failed with exit code $ARIA_EXIT_CODE"
-                
-                # If aria2c fails, try curl as fallback
-                if [ $ATTEMPT -eq $MAX_RETRIES ]; then
-                  echo "🔄 Trying curl as fallback..."
-                  CURL_ERROR=$(curl -L -o "tmp_downloads/$FILENAME" \
-                    --max-time 300 \
-                    --retry 3 \
-                    --retry-delay 5 \
-                    -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-                    -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
-                    "$RESOLVED_URL" 2>&1)
-                  
-                  if [ $? -eq 0 ] && [ -f "tmp_downloads/$FILENAME" ] && [ -s "tmp_downloads/$FILENAME" ]; then
-                    SUCCESS=true
-                    echo "✅ Downloaded successfully with curl: $FILENAME"
-                    break
-                  else
-                    ERROR_MSG="$ERROR_MSG\n\nCurl fallback also failed:\n$CURL_ERROR"
-                  fi
-                fi
-                
-                if [ $ATTEMPT -lt $MAX_RETRIES ]; then
-                  echo "⏳ Waiting ${RETRY_DELAY}s before retry..."
-                  sleep $RETRY_DELAY
-                  RETRY_DELAY=$((RETRY_DELAY * 2))
+                rm -f "tmp_downloads/$FILENAME"
+                create_error_file "$FILENAME" "Downloaded file is empty (0 bytes). The server may have returned an error page instead of the actual file." "$URL"
+                return 1
+              fi
+            else
+              create_error_file "$FILENAME" "$ERROR_LOG" "$URL"
+              return 1
+            fi
+          }
+
+          # Download each URL
+          for URL in $URLS; do
+            # Decode URL-encoded characters for filename
+            FILENAME=$(basename "$URL" | sed 's/%20/ /g' | sed 's/%2F/-/g' | sed 's/[?#].*//')
+            # Clean filename - remove query strings and special chars
+            FILENAME=$(echo "$FILENAME" | sed 's/[<>:"|?*]/_/g')
+
+            echo "⬇️ Downloading $URL -> $FILENAME"
+            download_with_retry "$URL" "$FILENAME" || echo "⚠️ Failed to download: $FILENAME"
+          done
+
+          # Zip all downloads if mode is 'zip'
+          if [ "$MODE" = "zip" ]; then
+            if [ -n "$(ls -A tmp_downloads 2>/dev/null)" ]; then
+              ARCHIVE_NAME="archive_$(date +%Y%m%d_%H%M%S)"
+              UNIQUE_ARCHIVE=$(get_unique_name "downloads" "${ARCHIVE_NAME}.zip" "false")
+              echo "📦 Creating zip archive: downloads/$UNIQUE_ARCHIVE"
+              zip -j "downloads/$UNIQUE_ARCHIVE" tmp_downloads/*
+            fi
+            rm -rf tmp_downloads
+          else
+            # Normal mode: handle splitting large files
+            for FILE in tmp_downloads/*; do
+              [ -f "$FILE" ] || continue
+              SIZE=$(stat -c%s "$FILE")
+              BASENAME=$(basename "$FILE")
+              # Remove extension for folder name
+              BASENAME_NO_EXT="${BASENAME%.*}"
+
+              if [ "$SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
+                echo "✂️ $BASENAME is $(( SIZE / 1024 / 1024 ))MB — splitting into ${SPLIT_THRESHOLD_MB}MB parts (zip-split)"
+
+                # Get unique folder name for split parts
+                FOLDER_NAME=$(get_unique_name "downloads" "$BASENAME_NO_EXT" "true")
+                mkdir -p "downloads/$FOLDER_NAME"
+
+                # Create a zip split into parts
+                zip -0 -s "${SPLIT_THRESHOLD_MB}m" "downloads/${FOLDER_NAME}/${BASENAME}.zip" -j "$FILE"
+
+                PARTS_COUNT=$(ls downloads/${FOLDER_NAME}/${BASENAME}.z* 2>/dev/null | wc -l)
+                echo "✅ Parts created in folder 'downloads/$FOLDER_NAME': $PARTS_COUNT files"
+
+                # Create a README in the folder
+                cat > "downloads/${FOLDER_NAME}/README.txt" << EOF
+═══════════════════════════════════════════════════════════════
+  AVASAM Split Archive
+  https://avasam.ir
+═══════════════════════════════════════════════════════════════
+
+📁 Original File: $BASENAME
+📊 Original Size: $(( SIZE / 1024 / 1024 )) MB
+📦 Parts: $PARTS_COUNT
+
+To extract, use one of these methods:
+
+Windows:
+  - Use 7-Zip or WinRAR to extract ${BASENAME}.zip
+
+Linux/Mac:
+  zip -F ${BASENAME}.zip --out combined.zip
+  unzip combined.zip
+
+═══════════════════════════════════════════════════════════════
+EOF
+              else
+                # Small file - check for duplicates
+                UNIQUE_NAME=$(get_unique_name "downloads" "$BASENAME" "false")
+                cp "$FILE" "downloads/$UNIQUE_NAME"
+                if [ "$UNIQUE_NAME" != "$BASENAME" ]; then
+                  echo "📝 File renamed to avoid overwrite: $BASENAME -> $UNIQUE_NAME"
                 fi
               fi
             done
-            
-            if [ "$SUCCESS" = false ]; then
-              echo "❌ All download attempts failed for: $FILENAME"
-              # Create error file
-              local ERROR_FILENAME=$(get_unique_name "downloads" "${FILENAME}.download_error.txt" "false")
-              {
-                echo "=========================================="
-                echo "AVASAM DOWNLOAD ERROR REPORT"
-                echo "=========================================="
-                echo ""
-                echo "Original URL: $URL"
+            rm -rf tmp_downloads
+          fi
+
+      - name: Commit & Push in batches of 5 files (AVASAM)
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          echo "🏷️  AVASAM (https://avasam.ir) - Preparing to commit files"
+
+          # Collect all new/modified files under downloads/
+          mapfile -t ALL_FILES < <(git ls-files --others --modified --exclude-standard downloads/)
+
+          TOTAL=${#ALL_FILES[@]}
+          echo "📦 Total files to push: $TOTAL"
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+
+          BATCH_SIZE=5
+          BATCH_NUM=0
+
+          for (( i=0; i<TOTAL; i+=BATCH_SIZE )); do
+            BATCH_NUM=$(( BATCH_NUM + 1 ))
+            BATCH=("${ALL_FILES[@]:i:BATCH_SIZE}")
+
+            echo "🚀 Pushing batch $BATCH_NUM: files $((i+1))–$(( i + ${#BATCH[@]} )) of $TOTAL"
+
+            git add "${BATCH[@]}"
+            git commit -m "[AVASAM] Add downloaded files — batch $BATCH_NUM [skip ci]"
+
+            # Pull with rebase before each push to avoid conflicts
+            git pull --rebase origin "$BRANCH"
+            git push origin HEAD:"$BRANCH"
+
+            echo "✅ Batch $BATCH_NUM pushed"
+          done
+
+          echo "🎉 All $TOTAL files pushed in $BATCH_NUM batch(es) — AVASAM (https://avasam.ir)"
